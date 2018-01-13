@@ -3,14 +3,19 @@ from keras import initializers, regularizers, constraints
 from keras.preprocessing.text import text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
 from keras.models import Sequential,Model
-from keras.layers import Activation, TimeDistributed, Dense, RepeatVector, recurrent, Embedding, Input, merge
+from keras.layers import dot, Activation, TimeDistributed, Dense, RepeatVector, recurrent, Embedding, Input, merge
 from keras.layers.recurrent import LSTM, SimpleRNN, GRU
 from keras.layers.wrappers import Bidirectional
 from keras.layers.core import Layer
-from keras.layers import Dense, Flatten
 from keras.optimizers import Adam, RMSprop
 from keras.utils import plot_model
 from keras.callbacks import EarlyStopping, ModelCheckpoint, Callback
+from keras.engine.topology import Layer, InputSpec
+from keras import initializers, regularizers, constraints
+from attention_decoder import AttentionDecoder 
+from seq2seq.models import SimpleSeq2Seq, Seq2Seq
+import seq2seq
+
 from nltk import FreqDist
 import numpy as np
 import os
@@ -20,7 +25,7 @@ import gc
 
 MAX_LEN = 20
 VOCAB_SIZE = 65
-BATCH_SIZE = 4
+BATCH_SIZE = 10
 LAYER_NUM = 5
 HIDDEN_DIM = 1000
 EPOCHS = 500
@@ -54,7 +59,7 @@ def load_data(data_file):
 		stripped_line = line.replace('\u200b','')
 		stripped_line = line.replace('\u200d','').split(',')
 		word_list.append(stripped_line)
-		#print(word_list)
+		
 		
 	X = [c[0] for c in word_list]
 	y = [c[1] for c in word_list]
@@ -136,127 +141,28 @@ def load_test_data(data_file, X_word2idx):
 
 	return (y, X_te, X)
 
-####################### Attention class starts here ############################
-# Source: https://gist.github.com/cbaziotis/6428df359af27d58078ca5ed9792bd6d
-
-def dot_product(x, kernel):
-    """
-    Wrapper for dot product operation, in order to be compatible with both
-    Theano and Tensorflow
-    Args:
-        x (): input
-        kernel (): weights
-    Returns:
-    """
-    if K.backend() == 'tensorflow':
-        # todo: check that this is correct
-        return K.squeeze(K.dot(x, K.expand_dims(kernel)), axis=-1)
-    else:
-        return K.dot(x, kernel)
-    
-
-class AttLayer(Layer):
-    def __init__(self, **kwargs):
-    	self.supports_masking = True
-    	self.init = initializers.get('normal')
-    	#self.input_spec = [InputSpec(ndim=3)]
-    	super(AttLayer, self).__init__(** kwargs)
-
-    def build(self, input_shape):
-        assert len(input_shape)==3
-        #self.W = self.init((input_shape[-1],1))
-        self.W = self.init((input_shape[-1],))
-        #self.input_spec = [InputSpec(shape=input_shape)]
-        self.trainable_weights = [self.W]
-        super(AttLayer, self).build(input_shape)  # be sure you call this somewhere!
-
-    def call(self, x, mask=None):
-        eij = K.tanh(K.dot(x, self.W))
-
-        ai = K.exp(eij)
-        weights = ai/K.sum(ai, axis=1).dimshuffle(0,'x')
-
-        weighted_input = x*weights.dimshuffle(0,1,'x')
-        return weighted_input.sum(axis=1)
-
-    def get_output_shape_for(self, input_shape):
-        return (input_shape[0], input_shape[-1])
 
 ####################### End of Attention class ##########################
 
-def create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, hidden_size, num_layers, embedding_matrix):
-	'''
-	model = Sequential()
+def create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, hidden_size, num_layers, embedding_matrix, X_word_to_ix, y_word_to_ix):
 
-	# Creating encoder network
-	model.add(Embedding(X_vocab_len, 1000, input_length=X_max_len, mask_zero=True))
-	model.add(SimpleRNN(hidden_size))
-	model.add(RepeatVector(y_max_len))
-
-	# Creating decoder network
-	for _ in range(num_layers):
-		model.add(SimpleRNN(hidden_size, return_sequences=True))
-		model.add(Attention())
-	model.add(TimeDistributed(Dense(y_vocab_len)))
-	model.add(Activation('softmax'))
-	model.compile(loss='categorical_crossentropy',
-			optimizer='rmsprop',
-			metrics=['accuracy'])
-	plot_model(model, to_file='model.png', show_shapes=True)
-	return model
-	
-	'''
-	########## FUNCTIONAL API ######################3
-	def smart_merge(vectors, **kwargs):
-			return vectors[0] if len(vectors)==1 else merge(vectors, **kwargs)		
-	
-	root_word_in = Input(shape=(X_max_len,), dtype='int32')
-	tag_word_in = Input(shape=(y_max_len,), dtype='int32')
-	# print root_word_in
-
+	# this embedding encodes input sequence into a sequence of 
+	# dense X_vocab_len-dimensional vectors.
 	emb_layer = Embedding(X_vocab_len, EMBEDDING_DIM, 
 				weights = [embedding_matrix], input_length=X_max_len,
-				mask_zero=True) # DEFINITION of layer
+				mask_zero=True, trainable=False) 
 	
-	hindi_word_embedding = emb_layer(root_word_in) # POSITION of layer
-	#root_word_embedding = Embedding(dim_embedding, 64,
-	#					   input_length=dim_root_word_in,
-	#					   W_constraint=maxnorm(2))(root_word_in)
-	
-	#ENCODER LSTM:
-	LtoR_LSTM = LSTM(512, return_sequences=False)
-	LtoR_LSTM_vector = LtoR_LSTM(hindi_word_embedding)
-	RtoL_LSTM = LSTM(512, return_sequences=False, go_backwards=True)
-	RtoL_LSTM_vector = RtoL_LSTM(hindi_word_embedding)
-	BidireLSTM_vector = [LtoR_LSTM_vector]
-	BidireLSTM_vector.append(RtoL_LSTM_vector)
-	BidireLSTM_vector= smart_merge(BidireLSTM_vector, mode='concat')
-	RepLayer= RepeatVector(y_max_len)
-	RepVec= RepLayer(BidireLSTM_vector)
-	Emb_plus_repeat=[hindi_word_embedding]
-	Emb_plus_repeat.append(RepVec)
-	Emb_plus_repeat = smart_merge(Emb_plus_repeat, mode='concat')
-	#temp = Emb_plus_repeat
-	
-	for _ in range(num_layers):
-		LtoR_LSTM = LSTM(512, return_sequences=True)
-		temp = LtoR_LSTM(Emb_plus_repeat)
-	
-	attention = AttLayer()
-	att = attention(temp)
+	model = Sequential()
+	seq2seq = Seq2Seq(input_dim=len(X_word_to_ix),
+		input_length=X_max_len,
+    	hidden_dim=512,
+    	output_dim=len(y_word_to_ix),
+    	output_length=y_max_len, depth=(4,5),
+    	broadcast_state=False)
+	model.add(seq2seq)
+	model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
 
-	outputs = Dense(y_vocab_len, activation='softmax')(att)
-	'''
-	time_dist_layer = TimeDistributed(Dense(y_vocab_len))(att)
-	'''
-	#outputs = Activation('softmax')(dense)
-	
-	all_inputs = [root_word_in]
-	model = Model(input=all_inputs, output=outputs)
-	model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-	
 	return model
-	
 
 def find_checkpoint_file(folder):
 	checkpoint_file = [f for f in os.listdir(folder) if 'checkpoint' in f]
@@ -312,32 +218,25 @@ X = pad_sequences(X, maxlen = X_max_len, dtype='int32')
 y = pad_sequences(y, maxlen = y_max_len, dtype='int32')
 
 print("Model compiling ..")
-model = create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, HIDDEN_DIM, LAYER_NUM, embedding_matrix)
+model = create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, HIDDEN_DIM, LAYER_NUM, embedding_matrix, X_word_to_ix, y_word_to_ix)
 
-saved_weights = find_checkpoint_file('.')
+saved_weights = "best_checkpoint_seq2seq.hdf5"
 
 if MODE == 'train':
-	# k_start = 1
 
-	# load trained weigths if any found
-	if(len(saved_weights) != 0):
-		print("Loading saved weights")
-		# epoch = saved_weights[saved_weights.rfind('_')+1:saved_weights.rfind('.')]
-		model.load_weights(saved_weights)
-		# k_start = int(epoch) + 1
+	print("Training")
+	y_sequences = process_data(y, y_max_len, y_word_to_ix)
+	X = process_data(X, X_max_len, X_word_to_ix)
+	early_stop = EarlyStopping(patience = 5)
 
-	else:
-		print("Training")
-		y_sequences = process_data(y, y_max_len, y_word_to_ix)
-		history = model.fit(X, y_sequences, validation_split= 0.1, batch_size=BATCH_SIZE, epochs = EPOCHS, 
-											verbose=2,callbacks=[EarlyStopping(patience=20,verbose=1), 
-											ModelCheckpoint('checkpoint_best_epoch.hdf5',
-										    save_best_only=True,
-										  	verbose=1)])
-		print(history.history.keys())
-		print(history)
-		# model.save_weights('checkpoint_epoch_{}.hdf5'.format(k))
-	# gc.collect()
+	model.fit(X, y_sequences, batch_size=BATCH_SIZE, 
+		epochs = 5, 
+		verbose=1, validation_split= 0.1,
+		callbacks=[early_stop, 
+		ModelCheckpoint('best_checkpoint_seq2seq.hdf5',
+		monitor='val_loss',save_best_only=True,verbose=1)])
+	
+									
 
 # performing test by loading saved training weights if we choose test mode
 else:
@@ -355,6 +254,7 @@ else:
 		# for i in X_test:
 		# 	print(len(i))
 		# x=input("pause")
+		X_test = process_data(X_test, X_max_len, X_word_to_ix)
 		print(X_test[0])
 		model.load_weights(saved_weights)
 		# print("saved_weights")
@@ -388,8 +288,9 @@ else:
 			print(test_sample_num,":",sequence)
 			sequences.append(sequence)
 		# np.savetxt('test_result.txt', sequences, fmt='%s')
-		filename = 'LSTM_new_attention_result_'+str(LAYER_NUM)+'layers_'+str(BATCH_SIZE)+'batches.txt'
+		filename = 'seq2seq'+str(LAYER_NUM)+'layers_'+str(BATCH_SIZE)+'batches.txt'
 		with open(filename, 'a', encoding='utf-8') as f:
+			f.write("Hindi words" + '\t' + "Machine Generated" + '\t'+ "Gold standard" + '\n')
 			for a,b,c in zip(hindi, bhojpuri, sequences):
 				f.write(str(a) + '\t' + str(b) + '\t'+ str(c) + '\n')
 
