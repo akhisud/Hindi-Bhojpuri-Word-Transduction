@@ -7,14 +7,12 @@ from keras.layers import dot, Activation, TimeDistributed, Dense, RepeatVector, 
 from keras.layers.recurrent import LSTM, SimpleRNN, GRU
 from keras.layers.wrappers import Bidirectional
 from keras.layers.core import Layer
-from keras.optimizers import Adam, RMSprop, SGD
+from keras.optimizers import Adam, RMSprop, SGD, Adagrad, Adadelta, SGD
 from keras.utils import plot_model
 from keras.callbacks import EarlyStopping, ModelCheckpoint, Callback
 from keras.engine.topology import Layer, InputSpec
 from keras import initializers, regularizers, constraints
 from attention_decoder import AttentionDecoder 
-from seq2seq.models import SimpleSeq2Seq, Seq2Seq, AttentionSeq2Seq
-import seq2seq
 
 from nltk import FreqDist
 import numpy as np
@@ -24,10 +22,13 @@ import sys
 import gc 
 
 MAX_LEN = 20
-VOCAB_SIZE = 60
-BATCH_SIZE = 6
-HIDDEN_DIM = 600
-EPOCHS = 100
+VOCAB_SIZE = 65
+BATCH_SIZE = 8
+LAYER_NUM = 5
+HIDDEN_DIM = 40
+EPOCHS = 500
+TIME_STEPS = 20
+dropout=0.2
 EMBEDDING_DIM = 150
 
 # Take this MODE as command line arg
@@ -64,7 +65,7 @@ def load_data(data_file):
 	#print(len(X))
 	#print(len(y))
 
-	X = [list(x)[::-1] for x, w in zip(X, y) if len(x) > 0 and len(w) > 0] # list of lists
+	X = [list(x) for x, w in zip(X, y) if len(x) > 0 and len(w) > 0] # list of lists
 	y = [list(w) for x, w in zip(X,y) if len(x) > 0 and len(w) > 0]
 	
 	# creating vocabulary with all words
@@ -127,7 +128,7 @@ def load_test_data(data_file, X_word2idx):
 	X_te = [c[0] for c in word_list]
 	y = [c[1] for c in word_list]
 
-	X = [list(x)[::-1] for x in X_te if len(X_te) > 0]
+	X = [list(x) for x in X_te if len(X_te) > 0]
 
 	for i,word in enumerate(X):
 		for j,letter in enumerate(word):
@@ -138,54 +139,57 @@ def load_test_data(data_file, X_word2idx):
 
 	return (y, X_te, X)
 
+ 
 ####################### End of Attention class ##########################
-'''
-def create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, hidden_size, num_layers, embedding_matrix, X_word_to_ix, y_word_to_ix):
+def create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, hidden_size, num_layers, embedding_matrix):
 
-	# this embedding encodes input sequence into a sequence of 
-	# dense X_vocab_len-dimensional vectors.
-	emb_layer = Embedding(X_vocab_len, EMBEDDING_DIM, 
-				weights = [embedding_matrix], input_length=X_max_len,
-				mask_zero=True, trainable=False) 
+	def smart_merge(vectors, **kwargs):
+			return vectors[0] if len(vectors)==1 else merge(vectors, **kwargs)		
 	
-	model = Sequential()
-	seq2seq = Seq2Seq(input_dim=len(X_word_to_ix),
-		input_length=X_max_len,
-    	hidden_dim=512,
-    	output_dim=len(y_word_to_ix),
-    	output_length=y_max_len, depth=(4,5),
-    	broadcast_state=False)
-	model.add(seq2seq)
-	model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-
-	return model
-'''
-def create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, hidden_size, embedding_matrix, X_word_to_ix, y_word_to_ix):
-
-	# this embedding encodes input sequence into a sequence of 
-	# dense X_vocab_len-dimensional vectors.
 	root_word_in = Input(shape=(X_max_len,), dtype='int32')
+	tag_word_in = Input(shape=(y_max_len,), dtype='int32')
+	# print root_word_in
 
+	# this embedding encodes input sequence into a sequence of 
+	# dense X_vocab_len-dimensional vectors.
 	emb_layer = Embedding(X_vocab_len, EMBEDDING_DIM, 
 				weights = [embedding_matrix], input_length=X_max_len,
-				mask_zero=True, trainable=True) 
+				mask_zero=True, trainable=True) # DEFINITION of layer
 	
-	hindi_word_embedding = emb_layer(root_word_in)
-	
-	seq2seq = Seq2Seq(hidden_dim= HIDDEN_DIM,
-    	output_dim=len(y_word_to_ix),
-    	output_length=y_max_len, 
-    	input_shape=(X_max_len,EMBEDDING_DIM), depth=(2,3),
-    	peek=True)
-	seq2seq_vec = seq2seq(hindi_word_embedding)
-	
+	hindi_word_embedding = emb_layer(root_word_in) # POSITION of layer
+	#root_word_embedding = Embedding(dim_embedding, 64,
+	#					   input_length=dim_root_word_in,
+	#					   W_constraint=maxnorm(2))(root_word_in)
+	'''
+	# A lstm will transform the vector sequence into a single vector,
+	# containing information about the entire sequence
+	LtoR_LSTM = LSTM(512, return_sequences=False)
+	LtoR_LSTM_vector = LtoR_LSTM(hindi_word_embedding)
+
+	RtoL_LSTM = LSTM(512, return_sequences=False, go_backwards=True)
+	RtoL_LSTM_vector = RtoL_LSTM(hindi_word_embedding)
+
+	BidireLSTM_vector = [LtoR_LSTM_vector]
+	BidireLSTM_vector.append(RtoL_LSTM_vector)
+	BidireLSTM_vector= smart_merge(BidireLSTM_vector, mode='concat')
+	'''
+	BidireLSTM_vector1= Bidirectional(LSTM(HIDDEN_DIM, return_sequences=True, dropout=0, kernel_regularizer=regularizers.l2(0.1)))(hindi_word_embedding)
+	#BidireLSTM_vector2 = LSTM(512, return_sequences=True, dropout=0.5)(BidireLSTM_vector1)
+	Attention = AttentionDecoder(HIDDEN_DIM, X_vocab_len)(BidireLSTM_vector1)
+
 	all_inputs = [root_word_in]
-	model = Model(input=all_inputs, output=seq2seq_vec)
-
-	sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True)
-	model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
+	model = Model(input=all_inputs, output=Attention)
+	adam = Adam()
+	model.compile(optimizer=adam, loss='categorical_crossentropy', metrics=['accuracy'])
+	
 	return model
+
+def find_checkpoint_file(folder):
+	checkpoint_file = [f for f in os.listdir(folder) if 'checkpoint' in f]
+	if len(checkpoint_file) == 0:
+		return []
+	modified_time = [os.path.getmtime(f) for f in checkpoint_file]
+	return checkpoint_file[np.argmax(modified_time)]
 
 # one-hot encoding
 def process_data(word_sentences, max_len, word_to_ix):
@@ -207,14 +211,11 @@ print(len(X_ix_to_word))
 print(len(y_word_to_ix))
 print(len(y_ix_to_word))
 
-'''
+
 X_max = max([len(word) for word in X])
 y_max = max([len(word) for word in y])
 X_max_len = max(X_max,y_max)
 y_max_len = max(X_max,y_max)
-'''
-X_max_len = max([len(word) for word in X])
-y_max_len = max([len(word) for word in y])
 
 ############### char2vec here ##################
 char2vec_file = "char2vec.txt"
@@ -237,29 +238,32 @@ X = pad_sequences(X, maxlen = X_max_len, dtype='int32', padding='post')
 y = pad_sequences(y, maxlen = y_max_len, dtype='int32', padding='post')
 
 print("Model compiling ..")
-model = create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, HIDDEN_DIM, embedding_matrix, X_word_to_ix, y_word_to_ix)
+model = create_model(X_vocab_len, X_max_len, y_vocab_len, y_max_len, HIDDEN_DIM, LAYER_NUM, embedding_matrix)
 
-saved_weights = "best_checkpoint_seq2seq.hdf5"
+saved_weights = "AttentionDecoder2_l2001.hdf5"	
 
 if MODE == 'train':
 
 	print("Training")
-
-	# shuffle the training data every epoch
 	indices = np.arange(len(X))
 	np.random.shuffle(indices)
 	X = X[indices]
 	y = y[indices]
 
-	early_stop = EarlyStopping(patience=5)
 	y_sequences = process_data(y, y_max_len, y_word_to_ix)
+	early_stop = EarlyStopping(patience=10)
 
-	model.fit(X, y_sequences, batch_size=BATCH_SIZE, 
-		epochs = EPOCHS, verbose=1, validation_split= 0.1,
-				callbacks=[early_stop])
-
-	model.save("best_checkpoint_seq2seq.hdf5")
-									
+	#model.load_weights(saved_weights)
+	history = model.fit(X, y_sequences, epochs = EPOCHS, verbose=1, 
+			validation_split = 0.1, batch_size=BATCH_SIZE,
+			callbacks=[early_stop, 
+				ModelCheckpoint('AttentionDecoder2_l2001.hdf5',
+					monitor='val_loss',save_best_only=True,verbose=1)])
+	print(history.history.keys())
+	print(history)
+	#model.save("AttentionDecoder.hdf5")
+	
+# performing test by loading saved training weights if we choose test mode
 else:
 	if len(saved_weights) == 0:
 		print("network hasn't been trained!")
@@ -267,15 +271,16 @@ else:
 	else:
 		test_sample_num =0 
 		bhojpuri, hindi, X_test = load_test_data('test_data.txt', X_word_to_ix)
-		# for i in X_test:
-		# 	print(i)
-		# x=input("pause")
 
 		X_test = pad_sequences(X_test, maxlen = X_max_len, dtype='int32', padding='post')
 
 		print(X_test[0])
 		model.load_weights(saved_weights)
-
+		# print("saved_weights")
+		# print(model.weights)
+		# x=input("pause")
+		plot_model(model, to_file="Attention_decoder.png", show_shapes=True, show_layer_names=True)
+		x=input("pause")
 		print("model.predict")
 		print(model.predict(X_test))
 		x=input("pause")
@@ -303,9 +308,9 @@ else:
 			print(test_sample_num,":",sequence)
 			sequences.append(sequence)
 		# np.savetxt('test_result.txt', sequences, fmt='%s')
-		filename = 'LSTM_new_attention_result_'+str(LAYER_NUM)+'layers_'+str(BATCH_SIZE)+'batches.txt'
-		with open(filename, 'a', encoding='utf-8') as f:
-			f.write("Hindi words" + '\t' + "Machine Generated" + '\t'+ "Gold standard" + '\n')
+		filename = 'AttentionDecoder_with_dropout'+str(BATCH_SIZE)+'batches' + str(dropout) + 'dropout.txt'
+		with open(filename, 'w', encoding='utf-8') as f:
+			f.write("Hindi words" + '\t\t' + "Gold standard" + '\t\t'+ "Machine Generated" + '\n')
 			for a,b,c in zip(hindi, bhojpuri, sequences):
-				f.write(str(a) + '\t' + str(b) + '\t'+ str(c) + '\n')
+				f.write(str(a) + '\t\t\t' + str(b) + '\t\t\t'+ str(c) + '\n')
 
